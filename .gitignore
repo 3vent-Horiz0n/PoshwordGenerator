@@ -1,0 +1,7 @@
+# Helper Scripts
+Install-Requirements.ps1
+New-ModuleManifest.ps1
+Start-ModuleBuild.ps1
+
+# OS Files
+.DS_Store
