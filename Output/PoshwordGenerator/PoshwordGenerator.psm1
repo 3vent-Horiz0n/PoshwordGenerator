@@ -1,11 +1,81 @@
-﻿#Region './Public/New-Poshword.ps1' 0
-function New-Poshword {
+﻿#Region './Private/Get-SecureRandomIndex.ps1' -1
 
+function Get-SecureRandomIndex {
+    param (
+        [Parameter(Mandatory)]
+        [System.Security.Cryptography.RandomNumberGenerator] $RandomNumberGenerator,
+
+        [Parameter(Mandatory)]
+        [ValidateRange(1, [int]::MaxValue)]
+        [int] $ExclusiveMaximum
+    )
+
+    # Reject the incomplete interval to avoid modulo bias. GetBytes is available
+    # on .NET Framework as well as .NET, including Windows PowerShell 5.1.
+    $bytes = [byte[]]::new(4)
+    $range = [uint64]4294967296
+    $limit = $range - ($range % [uint64]$ExclusiveMaximum)
+    do {
+        $RandomNumberGenerator.GetBytes($bytes)
+        $value = [uint64][BitConverter]::ToUInt32($bytes, 0)
+    } while ($value -ge $limit)
+
+    return [int]($value % [uint64]$ExclusiveMaximum)
+}
+#EndRegion './Private/Get-SecureRandomIndex.ps1' 23
+#Region './Private/SecureRandomizer.ps1' -1
+
+function SecureRandomizer {
+    # Implementation of the Fisher-Yates shuffle algorithm using the .Net cryptographic random number generator
+    param (
+        [char[]] $array,
+        [System.Security.Cryptography.RandomNumberGenerator] $RandomNumberGenerator
+    )
+
+    $ownsGenerator = $null -eq $RandomNumberGenerator
+    if ($ownsGenerator) {
+        $RandomNumberGenerator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    }
+
+    try {
+        # Fisher-Yates shuffle with uniformly distributed indices.
+        for ($i = $array.Length - 1; $i -gt 0; $i--) {
+            $j = Get-SecureRandomIndex -RandomNumberGenerator $RandomNumberGenerator -ExclusiveMaximum ($i + 1)
+            $temp = $array[$i]
+            $array[$i] = $array[$j]
+            $array[$j] = $temp
+        }
+    }
+    finally {
+        if ($ownsGenerator) {
+            $RandomNumberGenerator.Dispose()
+        }
+    }
+
+    return $array
+}
+#EndRegion './Private/SecureRandomizer.ps1' 30
+#Region './Public/New-Poshword.ps1' -1
+
+function New-Poshword {
     <#
     .SYNOPSIS
         Simple password generator.
     .DESCRIPTION
-        A simple password generator for manual use or in automation.
+        Generates passwords using cryptographic randomness for character selection and shuffling.
+        Returns one password per pipeline input. Each input defines the allowed special characters.
+    .PARAMETER AllowedSpecialCharacters
+        Nonempty character pool used for special characters. Accepts strings from the pipeline.
+    .PARAMETER AsSecureString
+        Returns a SecureString. Cannot be combined with ToClipboard or NoOutput.
+    .PARAMETER Length
+        Password length from 8 to 99. Defaults to 8.
+    .PARAMETER NoOutput
+        Suppresses password output. Requires ToClipboard to be enabled.
+    .PARAMETER SpecialCharacters
+        Number of characters drawn from AllowedSpecialCharacters, from 0 to Length. Defaults to 2.
+    .PARAMETER ToClipboard
+        Copies each password to the clipboard. Only the last password remains after pipeline input.
     .INPUTS
         System.String
     .OUTPUTS
@@ -32,167 +102,107 @@ function New-Poshword {
 
         Generates a new password with 8 characters (default) and 4 special characters.
     .EXAMPLE
-        New-Poshword -ADComplexity
+        New-Poshword 14 3 -AsSecureString
 
-        Generates a new password following standard Active Directory password complexity requirements and with the default length of 8 characters.
+        Generates a 14-character SecureString with 3 special characters.
     .EXAMPLE
-        New-Poshword -ADComplexity -Length 12
+        '!', '#' | New-Poshword -Length 12 -SpecialCharacters 2
 
-        Generates a new password following standard Active Directory password complexity requirements and with a length of 12 characters.
+        Generates two passwords, using the respective input as the special character pool.
     #>
-
     [CmdletBinding(DefaultParameterSetName = 'Manual')]
     [Alias('npw')]
+    [OutputType([string], [System.Security.SecureString])]
 
     param (
-        # Description                  Standard AD password complexity requirement
-        [Parameter(
-            Mandatory,
-            Position = 0,
-            ParameterSetName = 'ADComplexity'
-        )]
-        [Parameter(
-            ParameterSetName = 'SecureString'
-        )]
-        [Alias('AD', 'ADCmplx')]
-        [switch] $ADComplexity,
-
-        # Description                 Option to set possible special characters
-        [Parameter(
-            ValueFromPipeline,
-            ParameterSetName = 'ADComplexity'
-        )]
-        [Parameter(
-            ValueFromPipeline,
-            ParameterSetName = 'Manual'
-        )]
-        [Parameter(
-            ValueFromPipeline,
-            ParameterSetName = 'SecureString'
-        )]
+        # Description: Option to set possible special characters
+        [Parameter(ValueFromPipeline, ParameterSetName = 'Manual')]
+        [Parameter(ValueFromPipeline, ParameterSetName = 'SecureString')]
+        [Parameter(ValueFromPipeline, ParameterSetName = 'Clipboard')]
+        [ValidateNotNullOrEmpty()]
         [string] $AllowedSpecialCharacters = ',.-+#!§$%&/()=?;:_*{}[]\',
 
-        # Description                 Generates password as secure string
-        [Parameter(
-            ParameterSetName = 'SecureString'
-        )]
+        # Description: Generates password as secure string
+        [Parameter(ParameterSetName = 'SecureString')]
         [switch] $AsSecureString,
 
-        # Description                 Sets the length of the password.
-        [Parameter(
-            Position = 1,
-            ParameterSetName = 'ADComplexity'
-            )]
-        [Parameter(
-            Position = 0,
-            ParameterSetName = 'Manual'
-        )]
-        [Parameter(
-            ParameterSetName = 'SecureString'
-        )]
+        # Description: Sets the length of the password.
+        [Parameter(Position = 0, ParameterSetName = 'Manual')]
+        [Parameter(Position = 0, ParameterSetName = 'SecureString')]
+        [Parameter(Position = 0, ParameterSetName = 'Clipboard')]
         [ValidateRange(8, 99)]
         [Alias('L', 'Len')]
         [int] $Length = 8,
 
-        # Description                 Suppresses output to console
-        [Parameter(
-            ParameterSetName = 'ADComplexity'
-        )]
-        [Parameter(
-            ParameterSetName = 'Manual'
-        )]
+        # Description: Suppresses output to console
+        [Parameter(ParameterSetName = 'Clipboard')]
         [Alias('NO', 'NoOut')]
         [switch] $NoOutput,
 
-        # Description                 Password Special Character Count
-        [Parameter(
-            Position = 1,
-            ParameterSetName = 'Manual'
-        )]
-        [Parameter(
-            ParameterSetName = 'SecureString'
-        )]
+        # Description: Password Special Character Count
+        [Parameter(Position = 1, ParameterSetName = 'Manual')]
+        [Parameter(Position = 1, ParameterSetName = 'SecureString')]
+        [Parameter(Position = 1, ParameterSetName = 'Clipboard')]
         [ValidateRange(0, 99)]
         [Alias('S', 'SpC', 'Special')]
         [int] $SpecialCharacters = 2,
 
-        # Description                 Option to send Password to Clipboard
-        [Parameter(
-            ParameterSetName = 'ADComplexity'
-        )]
-        [Parameter(
-            ParameterSetName = 'Manual'
-        )]
+        # Description: Option to send Password to Clipboard
+        [Parameter(ParameterSetName = 'Clipboard')]
         [Alias('CP', 'Clip')]
         [switch] $ToClipboard
     )
 
     begin {
+        if ($NoOutput -and -not $ToClipboard) {
+            throw [System.Management.Automation.ParameterBindingException]::new(
+                'The -NoOutput parameter requires -ToClipboard to be enabled.'
+            )
+        }
+
+        if ($SpecialCharacters -gt $Length) {
+            throw [System.ArgumentException]::new(
+                'SpecialCharacters must not exceed Length.', 'SpecialCharacters'
+            )
+        }
+
         Write-Verbose "Cmdlet executed using parameter set $($PSCmdlet.ParameterSetName)."
+        $AlphaNumericCharList = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789'.ToCharArray()
     }
-    
+
     process {
-        #region     Setup Variables
-        $Password           = [System.Collections.Generic.List[string]]::new()
-        $UpperCaseCharList  = [char[]](65..90) | Where-Object { $_ -notin @('I', 'O') }
-        $LowerCaseCharList  = [char[]](97..122) | Where-Object { $_ -notin @('l') }
-        $DigitList          = 1..9
-        $SpecialCharList    = $AllowedSpecialCharacters.ToCharArray()
-        #endregion  Setup Variables
+        $Password = [System.Collections.Generic.List[char]]::new()
+        $SpecialCharList = $AllowedSpecialCharacters.ToCharArray()
+        $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
 
-        if ($ADComplexity) {
-            Write-Verbose -Message 'The switch -ADComplexity has been detected.'
-            $Char = $UpperCaseCharList | Get-Random
-            $Password.Add($Char)
-            $Char = $LowerCaseCharList | Get-Random
-            $Password.Add($Char)
-            $Char = $DigitList | Get-Random
-            $Password.Add($Char)
-            $Char = $SpecialCharList | Get-Random
-            $Password.Add($Char)
-            for ($i = 0; $i -lt $Length - 4; $i++) {
-                $Char = $UpperCaseCharList, $LowerCaseCharList, $DigitList, $SpecialCharList | Get-Random
-                $Password.Add($Char)
+        try {
+            for ($i = 0; $i -lt $Length - $SpecialCharacters; $i++) {
+                $index = Get-SecureRandomIndex -RandomNumberGenerator $rng -ExclusiveMaximum $AlphaNumericCharList.Length
+                $Password.Add($AlphaNumericCharList[$index])
             }
-        }
-        else {
-            if ($Length -eq $SpecialCharacters) {
-                for ($i = 0; $i -lt $Length; $i++) {
-                    $Char = $SpecialCharList | Get-Random
-                    $Password.Add($Char)
-                }
+            for ($i = 0; $i -lt $SpecialCharacters; $i++) {
+                $index = Get-SecureRandomIndex -RandomNumberGenerator $rng -ExclusiveMaximum $SpecialCharList.Length
+                $Password.Add($SpecialCharList[$index])
             }
-            elseif ($Length -lt $SpecialCharacters) {
-                Write-Host 'More special characters than password length.' -ForegroundColor Red
-                continue
-            }
-            else {
-                for ($i = 0; $i -lt $Length - $SpecialCharacters; $i++) {
-                    $Char = $UpperCaseCharList, $LowerCaseCharList, $DigitList | Get-Random
-                    $Password.Add($Char)
-                }
-                for ($i = 0; $i -lt $SpecialCharacters; $i++) {
-                    $Char = $SpecialCharList | Get-Random
-                    $Password.Add($Char)
-                }
-            }
-        }
-        $FinalPassword = [System.String]::Join('', ($Password | Sort-Object { Get-Random }))
-    }
 
-    end {
+            $FinalPassword = -join (SecureRandomizer -array $Password.ToArray() -RandomNumberGenerator $rng)
+        }
+        finally {
+            $rng.Dispose()
+        }
+
         if ($ToClipboard) {
-            Set-Clipboard -Value $FinalPassword
+            Set-Clipboard -Value $FinalPassword -ErrorAction Stop
             if (!$NoOutput) {
-                return $FinalPassword
+                $FinalPassword
             }
         }
         elseif ($AsSecureString) {
-            return $FinalPassword | ConvertTo-SecureString -AsPlainText -Force
+            $FinalPassword | ConvertTo-SecureString -AsPlainText -Force
         }
         else {
-            return $FinalPassword
+            $FinalPassword
         }
     }
 }
-#EndRegion './Public/New-Poshword.ps1' 197
+#EndRegion './Public/New-Poshword.ps1' 149
